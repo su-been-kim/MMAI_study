@@ -1,0 +1,11 @@
+# Ignore all files in the temp directory
+logs/
+logs_practice/
+VGGsound_individual/
+
+# Ignore all .pt files
+*.pt
+*.pth
+*.json
+*.pyc
+*.ipynb
