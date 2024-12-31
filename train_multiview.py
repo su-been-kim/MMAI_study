@@ -273,7 +273,7 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         top_k_data = json.load(f)
 
 
-    for i, (image, spec, v_hp_frame, _, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
+    for i, (image, spec, _, v_aug_frame, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
         data_time.update(time.time() - end)
         
         # 데이터 GPU로 이동
@@ -284,21 +284,22 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         image_emb, audio_emb = model.extract_features(image, spec)
         # 각각 사이즈 (B, C)를 가짐
         
-        hp_image_emb, _ = model.extract_features(v_hp_frame, spec) # hp_image_emb.size() = (B, 512)
+        aug_image_emb, _ = model.extract_features(v_aug_frame, spec) # hp_image_emb.size() = (B, 512)
+
 
         # 유사도 행렬을 배치 단위로 계산
         similarity_matrix = torch.einsum("bc, ac -> ba", image_emb, audio_emb)
         similarity_matrix = similarity_matrix/0.07
         #similarity_matrix : (B, B) 크기의 유사도 행렬
 
-        # Hard Positive Frame을 사용하여 유사도 행렬 계산
-        hp_similarity_matrix = torch.einsum("bc, ac -> ba", hp_image_emb, audio_emb)
-        hp_similarity_matrix = hp_similarity_matrix/0.07 # hp_similarity_matrix : (B, B) 크기의 유사도 행렬
+        # Image Augmentation Frame을 사용하여 유사도 행렬 계산
+        aug_similarity_matrix = torch.einsum("bc, ac -> ba", aug_image_emb, audio_emb)
+        aug_similarity_matrix = aug_similarity_matrix/0.07 # aug_similarity_matrix : (B, B) 크기의 유사도 행렬
 
         # Cross-Entropy Loss 계산
         labels = torch.arange(similarity_matrix.size(0)).long().cuda() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
         loss_1 = F.cross_entropy(similarity_matrix, labels)
-        loss_2 = F.cross_entropy(hp_similarity_matrix, labels)
+        loss_2 = F.cross_entropy(aug_similarity_matrix, labels)
         loss = loss_1 + loss_2
                         
         # 손실 및 시간 기록
@@ -369,15 +370,15 @@ def validate(test_loader, model, args):
             img_batch = image_embeddings[i:i + batch_size].cuda()
             aud_batch = audio_embeddings[j:j + batch_size].cuda()
             similarity_matrix[i:i + batch_size, j:j + batch_size] = torch.mm(img_batch, aud_batch.T).cpu()
-    # print(similarity_matrix.size()) # [1000, 1000]
+    # print(similarity_matrix.size()) # [15446, 15446]
 
     # Recall@10 계산
     # import pdb; pdb.set_trace()
     recall_at_10 = 0
     labels = torch.arange(similarity_matrix.size(0)).long() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
-    # labels = [0, 1, 2,..., 999]
+    # labels = [0, 1, 2,..., 15445]
     _, topk_indices = similarity_matrix.topk(10, dim=1, largest=True, sorted=True) # 상위 10개의 예측 결과와 인덱스
-    # topk_indices.size() = [1000, 10]
+    # topk_indices.size() = [15446, 10]
     recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
 
     return recall_at_10

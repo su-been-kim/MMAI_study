@@ -237,10 +237,10 @@ def _resnet(arch, block, layers, pretrained, progress, modal, **kwargs):
     # layers : layer별 block 개수를 나타내는 리스트
     # **kwargs : 기타 추가적인 인수를 받아서 전달
     model = ResNet(block, layers, modal, **kwargs)
-    #  if pretrained:
-        #  print('load pretrained res-18')
-        #  checkpoint = 'https://download.pytorch.org/models/resnet18-5c106cde.pth'
-        #  model.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+    if pretrained:
+        print('load pretrained res-18')
+        checkpoint = 'https://download.pytorch.org/models/resnet18-5c106cde.pth'
+        model.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
     return model
 
 def resnet18(pretrained=False, progress=True, modal='vision',**kwargs):

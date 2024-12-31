@@ -3,18 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torchvision.models import resnet18
-from DatasetLoader import GetAudioVideoDataset
+from DatasetLoader_origin import GetAudioVideoDataset
 from tqdm import tqdm
+import random
 
 import json
 import time
 
 # 데이터셋 경로와 파라미터 설정
-FEATURES_FILE = './features_vggsx512_5.pt'
-SIMILARITY_FILE = './similarity_matrix_60000x60000_5.pt'
-TOP_K_FILE = './top_k_similarity_5.json'
+FEATURES_FILE = './topk_features/features_vggsx512_1000.pt'
+SIMILARITY_FILE = './topk_similarity/similarity_matrix_60000x60000_1000.pt'
+TOP_K_FILE = './top_k_similarity_1000.json'
 BATCH_SIZE = 16
-TOP_K_VALUES = [200]
+TOP_K_VALUES = [1000, 3000]
 
 import argparse
 
@@ -136,9 +137,12 @@ for i in range(num_samples):
 
         if video_id not in top_k_results:
             top_k_results[video_id] = {}
-        
+
+        random_index = random.choice(topk_indices.tolist())  # 텐서를 리스트로 변환 후 random.choice 사용
+
+        top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": random_index}
         # top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": topk_indices}
-        top_k_results[video_id][f"Top-{k}"] = {"indices": topk_indices}
+        # top_k_results[video_id][f"Top-{k}"] = {"indices": topk_indices}
 
 
 # JSON 파일로 저장

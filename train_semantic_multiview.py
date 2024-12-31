@@ -12,7 +12,7 @@ import torch.distributed as dist
 from PIL import Image
 import utils
 from model import AVENet
-from DatasetLoader import GetAudioVideoDataset
+from DatasetLoader_s_m import GetAudioVideoDataset
 from tqdm import tqdm
 import random
 from torchvision import transforms
@@ -160,7 +160,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_sampler = None
     if args.multiprocessing_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(traindataset) # train_sampler 초기화
-    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= 16, shuffle = (train_sampler is None), num_workers = 1, drop_last = True)
+    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= 16, shuffle = False, num_workers = 1, drop_last = True)
     
     testdataset = GetAudioVideoDataset(args,  mode='test') # test dataset 생성
     test_loader = torch.utils.data.DataLoader(testdataset, batch_size=128, shuffle=False, num_workers = 1)
@@ -265,15 +265,15 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         print("  global_step = %s" % global_step)
         print("  best_epoch = %s" % best_epoch)
         print("  best_acc = %.4f" % best_acc)
-    else:
-        epoch = 0  # 새로운 학습 시작 시 epoch을 0으로 설정
+    # else:
+    #     epoch = 0  # 새로운 학습 시작 시 epoch을 0으로 설정
 
     # JSON 데이터 로드 (for top-k similarity)
     with open('/mnt/scratch/users/sally/top_k_similarity_4.json', 'r') as f:
         top_k_data = json.load(f)
 
 
-    for i, (image, spec, _, video_idx, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
+    for i, (image, spec, v_hp_frame, v_aug_frame, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
         data_time.update(time.time() - end)
         
         # 데이터 GPU로 이동
@@ -283,70 +283,10 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         # 모델을 사용하여 임베딩 추출
         image_emb, audio_emb = model.extract_features(image, spec)
         # 각각 사이즈 (B, C)를 가짐
-
-        #====== Hard Positive Frame 생성하기 ======#
-        selected_index = []
-        for key, value in top_k_data.items():
-            video_id = value["Top-200"]["video_id"]
-            index = value["Top-200"]["indices"]
-
-            if video_id in video_idx:
-                random_index = random.choice(index)
-                selected_index.append(random_index)
-
-
-        # v_hp_frame 가져오기(hard positive frame)
-        dataset = GetAudioVideoDataset(args, mode='train')
-
-        v_hp_frames = []
-        for idx in selected_index:
-            v_hp_frame, _, _, _, _ = dataset[idx]
-            v_hp_frames.append(v_hp_frame)
         
-        batch_v_hp_frames = torch.stack(v_hp_frames).cuda() # batch_v_hp_frames.size() = (B, 3, 224, 224)
-        hp_image_emb, _ = model.extract_features(batch_v_hp_frames, spec) # hp_image_emb.size() = (B, 512)
+        hp_image_emb, _ = model.extract_features(v_hp_frame, spec) # hp_image_emb.size() = (B, 512)
+        aug_image_emb, _ = model.extract_features(v_aug_frame, spec) # hp_image_emb.size() = (B, 512)
 
-        #========================================#
-
-        #===== Image augmentation frame 생성하기 =====#
-        # Augmentation Transform 정의
-        imgSize = 224 
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-
-        aug_img_transform = transforms.Compose([
-            transforms.Resize(int(imgSize * 1.1), Image.BICUBIC),
-            transforms.RandomCrop(imgSize),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomAffine(degrees=0, translate=(0.2, 0.2)),
-            transforms.CenterCrop(imgSize),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std)
-        ])
-
-        augmented_images = []
-
-        # 배치 내 각 이미지에 transform 적용
-        for img in image:
-            # 텐서를 PIL 이미지로 변환 (C, H, W → H, W, C로 변환 필요)
-            pil_img = transforms.ToPILImage()(img.cpu())
-            
-            # Transform 적용
-            aug_img = aug_img_transform(pil_img)
-            
-            # 리스트에 추가
-            augmented_images.append(aug_img)
-
-        # 리스트를 다시 텐서로 변환 (B, C, H, W)
-        augmented_frames = torch.stack(augmented_images)
-
-        aug_image_emb, _ = model.extract_features(augmented_frames, spec) # hp_image_emb.size() = (B, 512)
-
-        # ======================================== #
-
-        
 
         # 유사도 행렬을 배치 단위로 계산
         similarity_matrix = torch.einsum("bc, ac -> ba", image_emb, audio_emb)
@@ -375,9 +315,6 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         optimizer.step()
 
         # 메모리 관리: 사용하지 않는 텐서 삭제 및 캐시 정리
-        # del similarity_matrix, image_emb, audio_emb, labels
-        torch.cuda.empty_cache()
-
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -406,7 +343,7 @@ def validate(test_loader, model, args):
     # evaluator = utils.Evaluator()
 
     # 데이터셋에서 이미지와 오디오 임베딩 추출
-    for step, (image, spec, _, name, _) in tqdm(enumerate(test_loader), desc="Validate Embedding Extraction", total=len(test_loader)):
+    for step, (image, spec, _, _, _, name, _) in tqdm(enumerate(test_loader), desc="Validate Embedding Extraction", total=len(test_loader)):
         image, spec = image.cuda().float(), spec.cuda().float()
 
         with torch.no_grad():
@@ -436,15 +373,15 @@ def validate(test_loader, model, args):
             img_batch = image_embeddings[i:i + batch_size].cuda()
             aud_batch = audio_embeddings[j:j + batch_size].cuda()
             similarity_matrix[i:i + batch_size, j:j + batch_size] = torch.mm(img_batch, aud_batch.T).cpu()
-    # print(similarity_matrix.size()) # [15446, 15446]
+    # print(similarity_matrix.size()) # [1000, 1000]
 
     # Recall@10 계산
     # import pdb; pdb.set_trace()
     recall_at_10 = 0
     labels = torch.arange(similarity_matrix.size(0)).long() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
-    # labels = [0, 1, 2,..., 15445]
+    # labels = [0, 1, 2,..., 999]
     _, topk_indices = similarity_matrix.topk(10, dim=1, largest=True, sorted=True) # 상위 10개의 예측 결과와 인덱스
-    # topk_indices.size() = [15446, 10]
+    # topk_indices.size() = [1000, 10]
     recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
 
     return recall_at_10
