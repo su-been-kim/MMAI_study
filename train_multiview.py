@@ -9,17 +9,15 @@ import json
 import torch.nn.functional as F
 from torch import multiprocessing as mp
 import torch.distributed as dist
-from PIL import Image
+
 import utils
 from model import AVENet
 from DatasetLoader_s_m import GetAudioVideoDataset
 from tqdm import tqdm
-import random
-from torchvision import transforms
-
 
 # from datasets import get_train_dataset, get_test_dataset
 from torch.utils.tensorboard import SummaryWriter
+
 
 
 import argparse
@@ -62,6 +60,7 @@ def get_arguments():
     parser.add_argument('--port', type=int, default=12345, help='Port for distributed training communication')
     parser.add_argument('--dist_url', type=str, default='tcp://localhost:12345', help='URL for distributed training')
     parser.add_argument('--multiprocessing_distributed', action='store_true', help='Use multi-processing distributed training')
+    # parser.add_argument('--loss', type=str, default='baseline', help='Choosing loss function')
 
     # tensorboard 관련 parser
     parser.add_argument('--exp_dir', type=str, default="", help='Should be "./logs/exp#" form')
@@ -101,6 +100,7 @@ def main_worker(gpu, ngpus_per_node, args):
         
     # Setup distributed environment
     if args.multiprocessing_distributed:
+        # 여기 안들어옴
         if args.dist_url == "env://" and args.rank == -1:
             args.rank = int(os.environ["RANK"])
         if args.multiprocessing_distributed:
@@ -113,7 +113,7 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.distributed.barrier() # 모든 프로세스가 이 지점에 도달할 때까지 대기
 
     # Create model dir
-    model_dir = os.path.join(args.model_dir, args.experiment_name)
+    model_dir = os.path.join(args.model_dir, args.experiment_name) # ./checkpoints/hdvsl_vggss
     os.makedirs(model_dir, exist_ok=True)
     utils.save_json(vars(args), os.path.join(model_dir, 'configs.json'), sort_keys=True, save_pretty=True)
     # sort_keys = True : key를 정렬하여 저장
@@ -145,22 +145,21 @@ def main_worker(gpu, ngpus_per_node, args):
     # Resume if possible
 
     start_epoch, best_recall_at_10 = 0, 0.  # 초기화 단계로 처음에 변수를 0으로 설정
-    if os.path.exists(os.path.join(model_dir, 'latest.pth')): # model_dir = './checkpoints/hdvsl_vggss'
-        ckp = torch.load(os.path.join(model_dir, 'latest.pth'), map_location='cpu') # latest.pth 파일을 로드하여 ckp에 저장
-        start_epoch = ckp.get('epoch', 0)
-        best_recall_at_10 = ckp.get('best_recall_at_10', 0.0)  # 로드한 checkpoint file에서 epoch, best_recall_at_10 값을 가져와 할당
-        model.load_state_dict(ckp['model'])
-        optimizer.load_state_dict(ckp['optimizer'])
-        print(f'loaded from {os.path.join(model_dir, "latest.pth")}')
+    # if os.path.exists(os.path.join(model_dir, 'latest.pth')): # model_dir = './checkpoints/hdvsl_vggss'
+    #     ckp = torch.load(os.path.join(model_dir, 'latest.pth'), map_location='cpu') # latest.pth 파일을 로드하여 ckp에 저장
+    #     start_epoch = ckp.get('epoch', 0)
+    #     best_recall_at_10 = ckp.get('best_recall_at_10', 0.0)  # 로드한 checkpoint file에서 epoch, best_recall_at_10 값을 가져와 할당
+    #     model.load_state_dict(ckp['model'])
+    #     optimizer.load_state_dict(ckp['optimizer'])
+    #     print(f'loaded from {os.path.join(model_dir, "latest.pth")}')
 
 
     # Dataloaders
-    # traindataset = get_train_dataset(args)
     traindataset = GetAudioVideoDataset(args, mode = 'train') # train dataset 생성
     train_sampler = None
     if args.multiprocessing_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(traindataset) # train_sampler 초기화
-    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= 16, shuffle = False, num_workers = 1, drop_last = True)
+    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= args.batch_size, shuffle = True, num_workers = 10, drop_last = True)
     
     testdataset = GetAudioVideoDataset(args,  mode='test') # test dataset 생성
     test_loader = torch.utils.data.DataLoader(testdataset, batch_size=128, shuffle=False, num_workers = 1)
@@ -188,6 +187,13 @@ def main_worker(gpu, ngpus_per_node, args):
     best_recall_at_10 = 0.0
     model_dir = args.model_dir
 
+    saved_best_pth_path = os.path.join(model_dir, 'best.pth')
+    if not os.path.exists(saved_best_pth_path):
+        saved_best_recall_at_10 = 0.0
+    else:
+        ckp = torch.load(saved_best_pth_path)
+        saved_best_recall_at_10 = ckp['best_recall_at_10']
+    
 
     for epoch in range(start_epoch, args.epochs):
         if args.multiprocessing_distributed:
@@ -200,10 +206,12 @@ def main_worker(gpu, ngpus_per_node, args):
         recall_at_10 = validate(test_loader, model, args)
 
         writer.add_scalar('Validation/Recall@10', recall_at_10, epoch)
+
+        if recall_at_10 >= best_recall_at_10:
+            best_recall_at_10 = recall_at_10
         
         print(f'Recall@10 (epoch {epoch+1}): {recall_at_10}')
         print(f'best Recall@10: {best_recall_at_10}')
-
 
         # Checkpoint
         if args.rank == 0: # 분산 학습을 사용할 때, rank가 0인 프로세스만 checkpoint를 저장
@@ -211,30 +219,45 @@ def main_worker(gpu, ngpus_per_node, args):
                    'optimizer': optimizer.state_dict(),
                    'epoch': epoch+1,
                    'best_recall_at_10': best_recall_at_10}
+            model_dir = os.path.join(args.model_dir, args.experiment_name)
             torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
             print(f"Model saved to {model_dir}")
 
-        if recall_at_10 >= best_recall_at_10:
-            best_recall_at_10 = recall_at_10
-            if args.rank == 0:
-                torch.save(ckp, os.path.join(model_dir, 'best.pth'))        
+        # if recall_at_10 >= best_recall_at_10:
+        #     best_recall_at_10 = recall_at_10
+        #     if args.rank == 0:
+        #         torch.save(ckp, os.path.join(model_dir, 'best.pth'))
 
-# =============================================================== #
-def spatial_localization_sim(v, a):
-    sim = torch.einsum("bc, ac -> ba", v, a)
-    sim = sim/0.07
-    return sim
+    if best_recall_at_10 >= saved_best_recall_at_10:
+        saved_best_recall_at_10 = best_recall_at_10
+        if args.rank == 0:
+            ckp = {'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch+1,
+                    'best_recall_at_10': saved_best_recall_at_10}
+            torch.save(ckp, saved_best_pth_path)
+            print(f"New best model saved to {model_dir}") 
 
-def semantic_localization_sim(v, a, p_v, p_a):
-    v_proj = p_v(v)
-    a_proj = p_a(a)
+
+def load_labels(mode, ids):
+    if mode == 'train':
+        label_path = "/mnt/scratch/users/individuals/VGGsound_individual/metadata/train_a_third.json"
+    else:
+        label_path = "/mnt/scratch/users/individuals/VGGsound_individual/metadata/test.json"
+
+    with open(label_path, 'r') as f:
+        full_data = json.load(f)  # JSON 파일 전체를 로드
+        data = full_data["data"]  # "data" 키를 통해 실제 데이터에 접근
+
+    labels = {}
+    for item in data:
+        labels[item['video_id']] = item['labels']
+
+    id_labels = []
+    for id in ids:
+        id_labels.append(labels[id])
     
-    sim = torch.einsum("bc, ac -> ba", v_proj, a_proj)
-    sim = sim/0.07
-    return sim
-
-
-# =============================================================== #
+    return id_labels
 
 # 최종 느낌의 train 이었음
 def train(train_loader, model, optimizer, epoch, args, writer):
@@ -265,12 +288,6 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         print("  global_step = %s" % global_step)
         print("  best_epoch = %s" % best_epoch)
         print("  best_acc = %.4f" % best_acc)
-    # else:
-    #     epoch = 0  # 새로운 학습 시작 시 epoch을 0으로 설정
-
-    # JSON 데이터 로드 (for top-k similarity)
-    with open('/mnt/scratch/users/sally/top_k_similarity_4.json', 'r') as f:
-        top_k_data = json.load(f)
 
 
     for i, (image, spec, _, v_aug_frame, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
@@ -310,7 +327,6 @@ def train(train_loader, model, optimizer, epoch, args, writer):
 
         # 메모리 관리: 사용하지 않는 텐서 삭제 및 캐시 정리
         # del similarity_matrix, image_emb, audio_emb, labels
-        torch.cuda.empty_cache()
 
         batch_time.update(time.time() - end)
         end = time.time()
@@ -357,6 +373,8 @@ def validate(test_loader, model, args):
         audio_embeddings.append(aud_emb)
         ids.extend(name)
 
+    ids_labels = load_labels('test', ids)
+
     # 텐서로 결합
     image_embeddings = torch.cat(image_embeddings, dim=0)
     audio_embeddings = torch.cat(audio_embeddings, dim=0)
@@ -370,19 +388,32 @@ def validate(test_loader, model, args):
             img_batch = image_embeddings[i:i + batch_size].cuda()
             aud_batch = audio_embeddings[j:j + batch_size].cuda()
             similarity_matrix[i:i + batch_size, j:j + batch_size] = torch.mm(img_batch, aud_batch.T).cpu()
-    # print(similarity_matrix.size()) # [15446, 15446]
+    # print(similarity_matrix.size()) # [1000, 1000]
+    
+    # import pdb; pdb.set_trace()
 
     # Recall@10 계산
     # import pdb; pdb.set_trace()
     recall_at_10 = 0
     labels = torch.arange(similarity_matrix.size(0)).long() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
-    # labels = [0, 1, 2,..., 15445]
+    # labels = [0, 1, 2,..., 999]
     _, topk_indices = similarity_matrix.topk(10, dim=1, largest=True, sorted=True) # 상위 10개의 예측 결과와 인덱스
-    # topk_indices.size() = [15446, 10]
-    recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
+
+    topk_labels = [[ids_labels[idx] for idx in row] for row in topk_indices.cpu().numpy()]  # Shape: (B, k)
+    # target_labels = [ids_labels[idx] for idx in labels.cpu().numpy()]  # Shape: (B,)
+    
+    correct_count = 0
+    for i, target_label in enumerate(ids_labels):
+        if target_label in topk_labels[i]:
+            correct_count += 1
+
+    # Step 5: Calculate Recall@k
+    recall_at_10 = correct_count / len(labels)  # Total number of samples
+    
+    # topk_indices.size() = [1000, 10]
+    # recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
 
     return recall_at_10
-
 
 
 def evaluate_retrieval(similarity_matrix, ids):

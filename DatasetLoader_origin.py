@@ -33,7 +33,7 @@ class GetAudioVideoDataset(Dataset):
             self.data = json.load(f)['data']
             
             if mode == 'test':
-                self.data = self.data[:1000]
+                self.data = self.data[:5000] # 1000에서 5000으로 바꿈
 
         self.audio_path = os.path.join(data_path, 'sample_audio')
         self.video_path = os.path.join(data_path, 'sample_frames/frame_4')

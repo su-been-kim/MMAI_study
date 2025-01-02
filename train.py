@@ -145,13 +145,13 @@ def main_worker(gpu, ngpus_per_node, args):
     # Resume if possible
 
     start_epoch, best_recall_at_10 = 0, 0.  # 초기화 단계로 처음에 변수를 0으로 설정
-    # if os.path.exists(os.path.join(model_dir, 'latest.pth')): # model_dir = './checkpoints/hdvsl_vggss'
-    #     ckp = torch.load(os.path.join(model_dir, 'latest.pth'), map_location='cpu') # latest.pth 파일을 로드하여 ckp에 저장
-    #     start_epoch = ckp.get('epoch', 0)
-    #     best_recall_at_10 = ckp.get('best_recall_at_10', 0.0)  # 로드한 checkpoint file에서 epoch, best_recall_at_10 값을 가져와 할당
-    #     model.load_state_dict(ckp['model'])
-    #     optimizer.load_state_dict(ckp['optimizer'])
-    #     print(f'loaded from {os.path.join(model_dir, "latest.pth")}')
+    if os.path.exists(args.resume_path):
+        ckp = torch.load(args.resume_path, map_location='cpu') # latest.pth 파일을 로드하여 ckp에 저장
+        start_epoch = ckp.get('epoch', 0)
+        best_recall_at_10 = ckp.get('best_recall_at_10', 0.0)  # 로드한 checkpoint file에서 epoch, best_recall_at_10 값을 가져와 할당
+        model.load_state_dict(ckp['model'])
+        optimizer.load_state_dict(ckp['optimizer'])
+        print(f'loaded from {args.resume_path}')
 
 
     # Dataloaders
@@ -159,7 +159,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_sampler = None
     if args.multiprocessing_distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(traindataset) # train_sampler 초기화
-    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= 16, shuffle = False, num_workers = 1, drop_last = True)
+    train_loader = torch.utils.data.DataLoader(traindataset, batch_size= args.batch_size, shuffle = True, num_workers = 10, drop_last = True)
     
     testdataset = GetAudioVideoDataset(args,  mode='test') # test dataset 생성
     test_loader = torch.utils.data.DataLoader(testdataset, batch_size=128, shuffle=False, num_workers = 1)
@@ -184,7 +184,6 @@ def main_worker(gpu, ngpus_per_node, args):
     # SummaryWriter를 한 번만 생성
     writer = SummaryWriter(log_dir)
 
-    best_recall_at_10 = 0.0
     model_dir = args.model_dir
 
     saved_best_pth_path = os.path.join(model_dir, 'best.pth')
@@ -206,37 +205,47 @@ def main_worker(gpu, ngpus_per_node, args):
         recall_at_10 = validate(test_loader, model, args)
 
         writer.add_scalar('Validation/Recall@10', recall_at_10, epoch)
+
+        if recall_at_10 >= best_recall_at_10:
+            best_recall_at_10 = recall_at_10
         
         print(f'Recall@10 (epoch {epoch+1}): {recall_at_10}')
         print(f'best Recall@10: {best_recall_at_10}')
 
-
         # Checkpoint
-        # if args.rank == 0: # 분산 학습을 사용할 때, rank가 0인 프로세스만 checkpoint를 저장
-        #     ckp = {'model': model.state_dict(),
-        #            'optimizer': optimizer.state_dict(),
-        #            'epoch': epoch+1,
-        #            'best_recall_at_10': best_recall_at_10}
-        #     torch.save(ckp, os.path.join(model_dir, 'latest.pth'))
-        #     print(f"Model saved to {model_dir}")
+        if args.rank == 0:  # 분산 학습을 사용할 때, rank가 0인 프로세스만 checkpoint 저장
+            ckp = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch + 1,
+                'best_recall_at_10': best_recall_at_10
+            }
+            model_dir = os.path.join(args.model_dir, args.experiment_name)
+            os.makedirs(model_dir, exist_ok=True)  # Ensure the directory exists
+
+            # Save checkpoint for the current epoch
+            checkpoint_path = os.path.join(model_dir, f'epoch_{epoch+1}.pth')
+            torch.save(ckp, checkpoint_path)
+
+            print(f"Checkpoint for epoch {epoch+1} saved to {checkpoint_path}")
 
         # if recall_at_10 >= best_recall_at_10:
         #     best_recall_at_10 = recall_at_10
         #     if args.rank == 0:
         #         torch.save(ckp, os.path.join(model_dir, 'best.pth'))
 
-        if recall_at_10 >= saved_best_recall_at_10:
-            saved_best_recall_at_10 = recall_at_10
-            if args.rank == 0:
-                ckp = {'model': model.state_dict(),
-                       'optimizer': optimizer.state_dict(),
-                       'epoch': epoch+1,
-                       'best_recall_at_10': saved_best_recall_at_10}
-                torch.save(ckp, saved_best_pth_path)
-                print(f"New best model saved to {model_dir}")     
+    if best_recall_at_10 >= saved_best_recall_at_10:
+        saved_best_recall_at_10 = best_recall_at_10
+        if args.rank == 0:
+            ckp = {'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch+1,
+                    'best_recall_at_10': saved_best_recall_at_10}
+            torch.save(ckp, saved_best_pth_path)
+            print(f"New best model saved to {model_dir}") 
 
 
-def load_labels(mode):
+def load_labels(mode, ids):
     if mode == 'train':
         label_path = "/mnt/scratch/users/individuals/VGGsound_individual/metadata/train_a_third.json"
     else:
@@ -249,8 +258,12 @@ def load_labels(mode):
     labels = {}
     for item in data:
         labels[item['video_id']] = item['labels']
+
+    id_labels = []
+    for id in ids:
+        id_labels.append(labels[id])
     
-    return labels
+    return id_labels
 
 # 최종 느낌의 train 이었음
 def train(train_loader, model, optimizer, epoch, args, writer):
@@ -271,16 +284,16 @@ def train(train_loader, model, optimizer, epoch, args, writer):
     end = time.time()
     global_step = 0
 
-    if args.resume:
-        # 진행 상태 복원
-        exp_dir = args.exp_dir
-        progress_pkl = f"{exp_dir}/progress.pkl"
-        progress_data, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
-        print("\nResume training from:")
-        print("  epoch = %s" % epoch)
-        print("  global_step = %s" % global_step)
-        print("  best_epoch = %s" % best_epoch)
-        print("  best_acc = %.4f" % best_acc)
+    # if args.resume:
+    #     # 진행 상태 복원
+    #     exp_dir = args.exp_dir
+    #     progress_pkl = f"{exp_dir}/progress.pkl"
+    #     progress_data, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
+    #     print("\nResume training from:")
+    #     print("  epoch = %s" % epoch)
+    #     print("  global_step = %s" % global_step)
+    #     print("  best_epoch = %s" % best_epoch)
+    #     print("  best_acc = %.4f" % best_acc)
 
 
     for i, (image, spec, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
@@ -320,99 +333,14 @@ def train(train_loader, model, optimizer, epoch, args, writer):
 
         # 미니 배치가 끝날 때마다 메모리 캐시 비우기
         torch.cuda.empty_cache()
-        writer.add_scalar('Train/Loss(step)', loss.item(), global_step)
+        # writer.add_scalar('Train/Loss(step)', loss.item(), global_step)
 
 
     # TensorBoard에 손실 및 시간 기록 추가
-    writer.add_scalar('Train/Loss(epoch)', loss.item(), epoch)
+    writer.add_scalar('Train/Loss', loss.item(), epoch)
     writer.add_scalar('Train/Average Loss', loss_mtr.avg, epoch)
     writer.add_scalar('Train/Batch Time', batch_time.avg, epoch)
     writer.add_scalar('Train/Data Loading Time', data_time.avg, epoch)
-
-
-# def train(train_loader, model, optimizer, epoch, args, writer):
-#     print("train 들어옴")
-#     model.train() # 모델을 훈련 모드로 전환
-#     batch_time = AverageMeter('Time', ':6.3f') # 소수점 이하 3자리까지, 총 6자리
-#     data_time = AverageMeter('Data', ':6.3f') # 소수점 이하 3자리까지, 총 6자리
-#     loss_mtr = AverageMeter('Loss', ':.3f')
-#     recall_at_10_mtr = AverageMeter('Recall@10', ':.3f')
-
-
-#     progress = ProgressMeter(
-#         len(train_loader),
-#         [batch_time, data_time, loss_mtr],
-#         prefix="Epoch: [{}]".format(epoch),
-#     )
-
-#     end = time.time()
-#     global_step = 0
-
-#     if args.resume:
-#         # 진행 상태 복원
-#         exp_dir = args.exp_dir
-#         progress_pkl = f"{exp_dir}/progress.pkl"
-#         progress_data, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
-#         print("\nResume training from:")
-#         print("  epoch = %s" % epoch)
-#         print("  global_step = %s" % global_step)
-#         print("  best_epoch = %s" % best_epoch)
-#         print("  best_acc = %.4f" % best_acc)
-#     else:
-#         epoch = 0  # 새로운 학습 시작 시 epoch을 0으로 설정
-
-#     batch_size = 50
-
-#     for i, (image, spec, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
-#         data_time.update(time.time() - end)
-        
-#         # import pdb; pdb.set_trace()
-
-#         # 데이터 GPU로 이동
-#         spec = spec.cuda()
-#         image = image.cuda()
-
-#         # import pdb; pdb.set_trace()
-
-#         A,logits,Pos,Neg = model(image.float(), spec.float(), args, mode = 'train')
-#         # logits.size() = [50, 52]
-#         targets = torch.zeros(logits.size(0), dtype=torch.long).cuda()  # Positive class: index 0
-#         # targets.size() = [50]
-#         loss = F.cross_entropy(logits, targets)
-
-#         # Get the indices of the top-k predictions for each sample
-#         # import pdb; pdb.set_trace()
-#         _, topk_indices = torch.topk(logits, k=10, dim=1)  # (B, top_k)
-#         correct = (topk_indices == targets.unsqueeze(1)).sum(dim=1)  # (B,)
-    
-#         # Recall is the mean of correct predictions across the batch
-#         recall_at_10 = correct.float().mean().item()
-                
-#         # 손실 및 시간 기록
-#         loss_mtr.update(loss.item(), image.shape[0])
-#         recall_at_10_mtr.update(recall_at_10, image.shape[0])
-#         optimizer.zero_grad()
-#         loss.backward()
-#         optimizer.step()
-
-#         # 메모리 관리: 사용하지 않는 텐서 삭제 및 캐시 정리
-#         # del similarity_matrix, image_emb, audio_emb, labels
-#         torch.cuda.empty_cache()
-
-#         batch_time.update(time.time() - end)
-#         end = time.time()
-
-#         # TensorBoard에 손실 및 시간 기록 추가
-#         writer.add_scalar('Train/Loss', loss.item(), global_step)
-#         writer.add_scalar('Train/Average Loss', loss_mtr.avg, global_step)
-#         writer.add_scalar('Train/Batch Time', batch_time.avg, global_step)
-#         writer.add_scalar('Train/Data Loading Time', data_time.avg, global_step)
-
-#         global_step += 1
-
-#         # 미니 배치가 끝날 때마다 메모리 캐시 비우기
-#         del loss
-#         torch.cuda.empty_cache()
 
 
 # 최종 느낌 validate 이었음
@@ -444,6 +372,8 @@ def validate(test_loader, model, args):
         audio_embeddings.append(aud_emb)
         ids.extend(name)
 
+    ids_labels = load_labels('test', ids)
+
     # 텐서로 결합
     image_embeddings = torch.cat(image_embeddings, dim=0)
     audio_embeddings = torch.cat(audio_embeddings, dim=0)
@@ -458,6 +388,8 @@ def validate(test_loader, model, args):
             aud_batch = audio_embeddings[j:j + batch_size].cuda()
             similarity_matrix[i:i + batch_size, j:j + batch_size] = torch.mm(img_batch, aud_batch.T).cpu()
     # print(similarity_matrix.size()) # [1000, 1000]
+    
+    # import pdb; pdb.set_trace()
 
     # Recall@10 계산
     # import pdb; pdb.set_trace()
@@ -465,57 +397,22 @@ def validate(test_loader, model, args):
     labels = torch.arange(similarity_matrix.size(0)).long() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
     # labels = [0, 1, 2,..., 999]
     _, topk_indices = similarity_matrix.topk(10, dim=1, largest=True, sorted=True) # 상위 10개의 예측 결과와 인덱스
+
+    topk_labels = [[ids_labels[idx] for idx in row] for row in topk_indices.cpu().numpy()]  # Shape: (B, k)
+    # target_labels = [ids_labels[idx] for idx in labels.cpu().numpy()]  # Shape: (B,)
+    
+    correct_count = 0
+    for i, target_label in enumerate(ids_labels):
+        if target_label in topk_labels[i]:
+            correct_count += 1
+
+    # Step 5: Calculate Recall@k
+    recall_at_10 = correct_count / len(labels)  # Total number of samples
+    
     # topk_indices.size() = [1000, 10]
-    recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
+    # recall_at_10 = (topk_indices == labels.unsqueeze(1)).sum().item() / labels.size(0)
 
     return recall_at_10
-
-
-# def validate(test_loader, model, args):
-#     """
-#     Validate the model on the test dataset.
-
-#     Args:
-#         test_loader (DataLoader): DataLoader for the test set.
-#         model (nn.Module): Trained model.
-#         args (argparse.Namespace): Arguments with necessary configurations.
-
-#     Returns:
-#         recall_at_10 (float): Recall@10 metric.
-#     """
-#     model.cuda()
-#     model.eval()
-
-#     recall_at_10 = 0  # Recall@10 초기화
-#     total_samples = 0  # 총 샘플 수
-
-#     with torch.no_grad():  # 검증에서는 그래디언트 계산 비활성화
-#         for step, (image, spec, _, _, _) in tqdm(enumerate(test_loader), desc="Validate Embedding Extraction", total=len(test_loader)):
-#             # Move inputs to GPU
-
-#             image, spec = image.cuda().float(), spec.cuda().float()
-
-#             # Forward pass
-#             A, logits, Pos, Neg = model(image, spec, args, mode='val')
-#             # logits.size() = (1, 3)
-#             # Pos.size() = (1, 1, 14, 14)
-
-#             # Calculate Recall@10
-#             batch_size = logits.size(0) # (1, 3)
-#             # print(logits.size()) # [128, 130]
-#             _, topk_indices = torch.topk(logits, k=10, dim=1)  # 상위 10개의 인덱스 가져오기
-#             targets = torch.zeros(batch_size, dtype=torch.long).cuda()  # Positive class는 index 0
-            
-#             # Top-k 인덱스에서 Positive Pair 확인
-#             correct = (topk_indices == targets.unsqueeze(1)).sum(dim=1)  # (B,)
-#             recall_at_10 += correct.float().sum().item()  # Recall@10 누적
-#             total_samples += batch_size
-
-#     # Normalize Recall@10
-#     recall_at_10 /= total_samples
-
-#     return recall_at_10
-
 
 
 def evaluate_retrieval(similarity_matrix, ids):

@@ -6,13 +6,14 @@ import numpy as np
 
 import torch
 import json
+from torch import nn
 import torch.nn.functional as F
 from torch import multiprocessing as mp
 import torch.distributed as dist
 
 import utils
 from model import AVENet
-from DatasetLoader_s_m import GetAudioVideoDataset
+from DatasetLoader_origin import GetAudioVideoDataset
 from tqdm import tqdm
 
 # from datasets import get_train_dataset, get_test_dataset
@@ -64,7 +65,8 @@ def get_arguments():
 
     # tensorboard 관련 parser
     parser.add_argument('--exp_dir', type=str, default="", help='Should be "./logs/exp#" form')
-    parser.add_argument('--resume', dest="resume", action="store_true", help='Resume training from last checkpoint if True')
+    # parser.add_argument('--resume', dest="resume", action="store_true", help='Resume training from last checkpoint if True')
+    parser.add_argument('--resume_path', type=str, default="", help='Path to the checkpoint to resume training')
 
 
     return parser.parse_args()
@@ -142,8 +144,8 @@ def main_worker(gpu, ngpus_per_node, args):
     # Optimizer
     optimizer, scheduler = utils.build_optimizer_and_scheduler_adam(model, args)
 
-    # Resume if possible
 
+    # Resume if possible
     start_epoch, best_recall_at_10 = 0, 0.  # 초기화 단계로 처음에 변수를 0으로 설정
     if os.path.exists(args.resume_path):
         ckp = torch.load(args.resume_path, map_location='cpu') # latest.pth 파일을 로드하여 ckp에 저장
@@ -229,6 +231,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
             print(f"Checkpoint for epoch {epoch+1} saved to {checkpoint_path}")
 
+
+        # if recall_at_10 >= best_recall_at_10:
+        #     best_recall_at_10 = recall_at_10
+        #     if args.rank == 0:
+        #         torch.save(ckp, os.path.join(model_dir, 'best.pth'))
+
     if best_recall_at_10 >= saved_best_recall_at_10:
         saved_best_recall_at_10 = best_recall_at_10
         if args.rank == 0:
@@ -259,6 +267,7 @@ def load_labels(mode, ids):
         id_labels.append(labels[id])
     
     return id_labels
+
 
 # 최종 느낌의 train 이었음
 def train(train_loader, model, optimizer, epoch, args, writer):
@@ -291,40 +300,31 @@ def train(train_loader, model, optimizer, epoch, args, writer):
     #     print("  best_acc = %.4f" % best_acc)
 
 
-    for i, (image, spec, rand_spec, v_hp_frame, v_aug_frame, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
+    for i, (image, spec, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
         data_time.update(time.time() - end)
-        
+
         # 데이터 GPU로 이동
         spec = spec.cuda()
         image = image.cuda()
 
         # 모델을 사용하여 임베딩 추출
-        image_emb, audio_emb = model.extract_features(image, spec)
-        # 각각 사이즈 (B, C)를 가짐
-        
-        hp_image_emb, _ = model.extract_features(v_hp_frame, spec) # hp_image_emb.size() = (B, 512)
-        aug_image_emb, _ = model.extract_features(v_aug_frame, spec) # hp_image_emb.size() = (B, 512)
+        # image_emb, audio_emb = model.extract_features(image, spec) # 각각 사이즈 (B, C)를 가짐
 
+        # localization loss 계산
+        image_emb, audio_emb, local_sim = model(image, spec, args, mode = 'train')
+        local_sim = local_sim/0.07        
 
+        # global loss 계산
         # 유사도 행렬을 배치 단위로 계산
         similarity_matrix = torch.einsum("bc, ac -> ba", image_emb, audio_emb)
         similarity_matrix = similarity_matrix/0.07
         #similarity_matrix : (B, B) 크기의 유사도 행렬
-
-        # Hard Positive Frame을 사용하여 유사도 행렬 계산
-        hp_similarity_matrix = torch.einsum("bc, ac -> ba", hp_image_emb, audio_emb)
-        hp_similarity_matrix = hp_similarity_matrix/0.07 # hp_similarity_matrix : (B, B) 크기의 유사도 행렬
-
-        # Image Augmentation Frame을 사용하여 유사도 행렬 계산
-        aug_similarity_matrix = torch.einsum("bc, ac -> ba", aug_image_emb, audio_emb)
-        aug_similarity_matrix = aug_similarity_matrix/0.07 # aug_similarity_matrix : (B, B) 크기의 유사도 행렬
-
+        
         # Cross-Entropy Loss 계산
         labels = torch.arange(similarity_matrix.size(0)).long().cuda() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
-        loss_1 = F.cross_entropy(similarity_matrix, labels)
-        loss_2 = F.cross_entropy(hp_similarity_matrix, labels)
-        loss_3 = F.cross_entropy(aug_similarity_matrix, labels)
-        loss = loss_1 + loss_2 + loss_3
+        glob_loss = F.cross_entropy(similarity_matrix, labels)
+        local_loss = F.cross_entropy(local_sim, labels)
+        loss = glob_loss + local_loss
                         
         # 손실 및 시간 기록
         loss_mtr.update(loss.item(), image.shape[0])
@@ -333,6 +333,8 @@ def train(train_loader, model, optimizer, epoch, args, writer):
         optimizer.step()
 
         # 메모리 관리: 사용하지 않는 텐서 삭제 및 캐시 정리
+        # del similarity_matrix, image_emb, audio_emb, labels
+
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -340,6 +342,7 @@ def train(train_loader, model, optimizer, epoch, args, writer):
 
         # 미니 배치가 끝날 때마다 메모리 캐시 비우기
         torch.cuda.empty_cache()
+        # writer.add_scalar('Train/Loss(step)', loss.item(), global_step)
 
 
     # TensorBoard에 손실 및 시간 기록 추가
@@ -361,7 +364,7 @@ def validate(test_loader, model, args):
     # evaluator = utils.Evaluator()
 
     # 데이터셋에서 이미지와 오디오 임베딩 추출
-    for step, (image, spec, _, _, _, name, _) in tqdm(enumerate(test_loader), desc="Validate Embedding Extraction", total=len(test_loader)):
+    for step, (image, spec, _, name, _) in tqdm(enumerate(test_loader), desc="Validate Embedding Extraction", total=len(test_loader)):
         image, spec = image.cuda().float(), spec.cuda().float()
 
         with torch.no_grad():

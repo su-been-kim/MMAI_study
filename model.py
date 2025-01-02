@@ -24,6 +24,8 @@ class AVENet(nn.Module):
         self.audnet = base_models.resnet18(modal='audio')
         self.imgnet = self.imgnet.cuda()
         self.audnet = self.audnet.cuda()
+        self.img_proj = nn.Linear(512, 512)
+        self.aud_proj = nn.Linear(512, 512)
 
         self.m = nn.Sigmoid()
         self.avgpool = nn.AdaptiveMaxPool2d((1, 1))
@@ -45,41 +47,57 @@ class AVENet(nn.Module):
 
     def forward(self, image, audio,args,mode='val'):
         # Image
-        B = image.shape[0]
+        image = image.float().cuda()
+        audio = audio.float().cuda()
+        # import pdb; pdb.set_trace()
+
+        B = image.shape[0] # batch_size
         self.mask = ( 1 -100 * torch.eye(B,B)).cuda()
-        img = self.imgnet(image)
-        img =  nn.functional.normalize(img, dim=1)
+        img_feature = self.imgnet(image)
+        img =  nn.functional.normalize(img_feature, dim=1) # (B, 512, 14, 14)
 
         # Audio
-        aud = self.audnet(audio)
-        aud = self.avgpool(aud).view(B,-1)
-        aud = nn.functional.normalize(aud, dim=1)
+        aud_feature = self.audnet(audio)
+        aud = self.avgpool(aud_feature).view(B,-1)
+        aud = nn.functional.normalize(aud, dim=1) # (B, 512)
         # Join them
-        A = torch.einsum('ncqa,nchw->nqa', [img, aud.unsqueeze(2).unsqueeze(3)]).unsqueeze(1)
-        A0 = torch.einsum('ncqa,ckhw->nkqa', [img, aud.T.unsqueeze(2).unsqueeze(3)])
+        # A = torch.einsum('ncqa,nchw->nqa', [img, aud.unsqueeze(2).unsqueeze(3)]).unsqueeze(1) # (B, 1, 14, 14)
+        A0 = torch.einsum('ncqa,ckhw->nkqa', [img, aud.T.unsqueeze(2).unsqueeze(3)]) # (B, B, 14, 14)
 
         # trimap
-        Pos = self.m((A - self.epsilon)/self.tau) 
-        if self.trimap:    
-            Pos2 = self.m((A - self.epsilon2)/self.tau) 
-            Neg = 1 - Pos2
-        else:
-            Neg = 1 - Pos
+        # Pos = self.m((A - self.epsilon)/self.tau) # Pos.size() = (B, 1, 14, 14)
+        # if self.trimap:  # True
+        #     Pos2 = self.m((A - self.epsilon2)/self.tau) 
+        #     Neg = 1 - Pos2
+        # else:
+        #     Neg = 1 - Pos
 
-        Pos_all =  self.m((A0 - self.epsilon)/self.tau) 
+        Pos_all =  self.m((A0 - self.epsilon)/self.tau) # (B, B, 14, 14)
 
         # positive
-        sim1 = (Pos * A).view(*A.shape[:2],-1).sum(-1) / (Pos.view(*Pos.shape[:2],-1).sum(-1))
+        # sim1 = (Pos * A).view(*A.shape[:2],-1).sum(-1) / (Pos.view(*Pos.shape[:2],-1).sum(-1)) # (B, 1)
         #negative
-        sim = ((Pos_all * A0).view(*A0.shape[:2],-1).sum(-1) / Pos_all.view(*Pos_all.shape[:2],-1).sum(-1) )* self.mask
-        sim2 = (Neg * A).view(*A.shape[:2],-1).sum(-1) / Neg.view(*Neg.shape[:2],-1).sum(-1)
-
-        if self.Neg:
-            logits = torch.cat((sim1,sim,sim2),1)/0.07
-        else:
-            logits = torch.cat((sim1,sim),1)/0.07
+        # sim = ((Pos_all * A0).view(*A0.shape[:2],-1).sum(-1) / Pos_all.view(*Pos_all.shape[:2],-1).sum(-1) )* self.mask # (B, B)
+        sim = ((Pos_all * A0).view(*A0.shape[:2],-1).sum(-1) / Pos_all.view(*Pos_all.shape[:2],-1).sum(-1) ) # (B, B)
         
-        return A,logits,Pos,Neg
+        # sim2 = (Neg * A).view(*A.shape[:2],-1).sum(-1) / Neg.view(*Neg.shape[:2],-1).sum(-1) # (B, 1)
+
+        # if self.Neg: # True
+        #     logits = torch.cat((sim1,sim,sim2),1)/0.07 # (B, B+2)
+        # else:
+        #     logits = torch.cat((sim1,sim),1)/0.07
+
+        image_emb = self.avgpool(img_feature).view(img_feature.size(0), -1)
+        image_emb = self.img_proj(image_emb)
+        image_emb = nn.functional.normalize(image_emb, dim=1)
+
+        audio_emb = self.avgpool(aud_feature).view(aud_feature.size(0), -1)
+        audio_emb = self.aud_proj(audio_emb)
+        audio_emb = nn.functional.normalize(audio_emb, dim=1)
+
+
+        return image_emb, audio_emb, sim
+        #return A,logits,Pos,Neg
 
 
     # feature extraction function 구현
