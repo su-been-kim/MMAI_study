@@ -14,7 +14,9 @@ The project focuses on multimodal audio-visual modeling, specifically targeting 
 
 For a high-level visual summary of the system architecture, data flow, and experimentation plan, refer to the following Figma board:
 
-👉 [View on Figma – Individual Study (MMAI Lab)](https://www.figma.com/deck/2Dd0OsIHjgfEAX1WT5teJ6/Individual-study-MMAI-lab?node-id=37-1245&t=EY8wbAW7S6mKhjqy-1)
+[![Figma Preview](./assets/MMAI_lab_figma.png)](https://www.figma.com/deck/2Dd0OsIHjgfEAX1WT5teJ6)
+
+↑ Click the image to open the full interactive board on Figma.
 
 ---
 
