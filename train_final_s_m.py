@@ -246,7 +246,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
             print(f"Checkpoint for epoch {epoch+1} saved to {checkpoint_path}")
 
-
+    import pdb; pdb.set_trace()
     if best_recall_at_10 >= saved_best_recall_at_10:
         saved_best_recall_at_10 = best_recall_at_10
         if args.rank == 0:
@@ -309,20 +309,10 @@ def train(train_loader, model, optimizer, epoch, args, writer):
     end = time.time()
     global_step = 0
 
-    # if args.resume:
-    #     # 진행 상태 복원
-    #     exp_dir = args.exp_dir
-    #     progress_pkl = f"{exp_dir}/progress.pkl"
-    #     progress_data, epoch, global_step, best_epoch, best_acc = load_progress(progress_pkl)
-    #     print("\nResume training from:")
-    #     print("  epoch = %s" % epoch)
-    #     print("  global_step = %s" % global_step)
-    #     print("  best_epoch = %s" % best_epoch)
-    #     print("  best_acc = %.4f" % best_acc)
-
-
     for i, (image, spec, rand_spec, v_hp_frame, v_aug_frame, _, _, _) in tqdm(enumerate(train_loader), desc="Train Embedding Extraction", total=len(train_loader)):
         data_time.update(time.time() - end)
+        torch.cuda.empty_cache()
+        print("들어왔어!!!")
         
         # 데이터 GPU로 이동
         spec = spec.cuda()
@@ -330,46 +320,87 @@ def train(train_loader, model, optimizer, epoch, args, writer):
 
 
         # ===== 1. Localization loss 계산 ===== #
-        # image_emb, audio_emb, local_sim = model(image, spec, args, mode = 'train')
-        # local_sim = local_sim/0.07
-        image_emb, audio_emb = model.extract_features(image, spec)
+        image_emb, audio_emb, local_sim, local_sim2 = model(image, spec, args, mode='train')
+        labels = torch.arange(local_sim.size(0)).long().cuda() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
+        local_sim = local_sim / 0.07
+        local_sim2 = local_sim2 / 0.07
+        local_loss = F.cross_entropy(local_sim, labels)
+        local_loss2 = F.cross_entropy(local_sim2, labels)
+
+        del local_sim, local_sim2
 
 
-        # ===== 2. Retrieval Loss 계산 ===== #          
-        hp_image_emb, _ = model.extract_features(v_hp_frame, spec) # hp_image_emb.size() = (B, 512)
-        # aug_image_emb, _ = model.extract_features(v_aug_frame, spec) # hp_image_emb.size() = (B, 512)
-        # _, rand_aud_emb = model.extract_features(image, rand_spec) # hp_image_emb.size() = (B, 512)
+        # ===== 2. Retrieval Loss 계산 ===== #
+        hp_image_emb, _, local_sim_3, local_sim_4 = model(v_hp_frame, spec, args, mode = 'train')
+        local_loss3 = F.cross_entropy(local_sim_3, labels)
+        local_loss4 = F.cross_entropy(local_sim_4, labels)
+        del local_sim_3, local_sim_4
 
-        similarity_matrix_IA = torch.einsum("bc, ac -> ba", image_emb, audio_emb)
-        similarity_matrix_IA = similarity_matrix_IA/0.07
-        
-        similarity_matrix_AI = torch.einsum("bc, ac -> ba", audio_emb, image_emb)
-        similarity_matrix_AI = similarity_matrix_AI/0.07
 
-        hp_similarity_matrix_IA = torch.einsum("bc, ac -> ba", hp_image_emb, audio_emb)
-        hp_similarity_matrix_IA = hp_similarity_matrix_IA/0.07
+        aug_image_emb, aug_aud_emb, local_sim_5, local_sim_6 = model(v_aug_frame, rand_spec, args, mode = 'train')
+        local_loss5 = F.cross_entropy(local_sim_5, labels)
+        local_loss6 = F.cross_entropy(local_sim_6, labels)
+        del local_sim_5, local_sim_6
 
-        hp_similarity_matrix_AI = torch.einsum("bc, ac -> ba", audio_emb, hp_image_emb)
-        hp_similarity_matrix_AI = hp_similarity_matrix_AI/0.07
+        _, _, local_sim_7, local_sim_8 = model(image, rand_spec, args, mode = 'train')
+        local_loss7 = F.cross_entropy(local_sim_7, labels)
+        local_loss8 = F.cross_entropy(local_sim_8, labels)
+        del local_sim_7, local_sim_8
 
-        # aug_similarity_matrix = torch.einsum("bc, ac -> ba", aug_image_emb, audio_emb)
-        # aug_similarity_matrix = aug_similarity_matrix/0.07
+        _, _, local_sim_9, local_sim_10 = model(v_hp_frame, rand_spec, args, mode = 'train')
+        local_loss9 = F.cross_entropy(local_sim_9, labels)
+        local_loss10 = F.cross_entropy(local_sim_10, labels)
+        del local_sim_9, local_sim_10
+
+        _, _, local_sim_11, local_sim_12 = model(v_aug_frame, spec, args, mode = 'train')
+        local_loss11 = F.cross_entropy(local_sim_11, labels)
+        local_loss12 = F.cross_entropy(local_sim_12, labels)
+        del local_sim_11, local_sim_12
+
+
+        similarity_matrix_IA = torch.einsum("bc, ac -> ba", image_emb, audio_emb) / 0.07
+        similarity_matrix_AI = torch.einsum("bc, ac -> ba", audio_emb, image_emb) / 0.07
+
+        sim_2_IA = torch.einsum("bc, ac -> ba", image_emb, aug_aud_emb) / 0.07
+        sim_2_AI = torch.einsum("bc, ac -> ba", aug_aud_emb, image_emb) / 0.07
+
+
+        hp_similarity_matrix_IA = torch.einsum("bc, ac -> ba", hp_image_emb, audio_emb) / 0.07
+        hp_similarity_matrix_AI = torch.einsum("bc, ac -> ba", audio_emb, hp_image_emb) / 0.07
+
+        hp_sim_2_IA = torch.einsum("bc, ac -> ba", hp_image_emb, aug_aud_emb) / 0.07
+        hp_sim_2_AI = torch.einsum("bc, ac -> ba", aug_aud_emb, hp_image_emb) / 0.07
+
+
+        aug_similarity_matrix_IA = torch.einsum("bc, ac -> ba", aug_image_emb, audio_emb) / 0.07
+        aug_similarity_matrix_AI = torch.einsum("bc, ac -> ba", audio_emb, aug_image_emb) / 0.07
+
+        aug_sim_2_IA = torch.einsum("bc, ac -> ba", aug_image_emb, aug_aud_emb) / 0.07
+        aug_sim_2_AI = torch.einsum("bc, ac -> ba", aug_aud_emb, aug_image_emb) / 0.07
+
 
         # Cross-Entropy Loss 계산
         labels = torch.arange(similarity_matrix_IA.size(0)).long().cuda() # 각 샘플이 자기 자신과 가장 유사해야한다는 가정을 따름
         loss_1 = F.cross_entropy(similarity_matrix_IA, labels)
         loss_2 = F.cross_entropy(similarity_matrix_AI, labels)
-        loss_3 = F.cross_entropy(hp_similarity_matrix_IA, labels)
-        loss_4 = F.cross_entropy(hp_similarity_matrix_AI, labels)
-        # loss_3 = F.cross_entropy(aug_similarity_matrix, labels)
+        loss_3 = F.cross_entropy(sim_2_IA, labels)
+        loss_4 = F.cross_entropy(sim_2_AI, labels)
+        loss_5 = F.cross_entropy(hp_similarity_matrix_IA, labels)
+        loss_6 = F.cross_entropy(hp_similarity_matrix_AI, labels)
+        loss_7 = F.cross_entropy(hp_sim_2_IA, labels)
+        loss_8 = F.cross_entropy(hp_sim_2_AI, labels)
+        loss_9 = F.cross_entropy(aug_similarity_matrix_IA, labels)
+        loss_10 = F.cross_entropy(aug_similarity_matrix_AI, labels)
+        loss_11 = F.cross_entropy(aug_sim_2_IA, labels)
+        loss_12 = F.cross_entropy(aug_sim_2_AI, labels)
+    
 
 
         # ===== 3. Total Loss 계산 ===== #
-        glob_loss = (loss_1 + loss_2) * 0.5 + (loss_3 + loss_4) * 0.5
-        # local_loss = F.cross_entropy(local_sim, labels)
+        global_loss = (loss_1 + loss_2) * 0.5 + (loss_3 + loss_4) * 0.5 + (loss_5 + loss_6) * 0.5 + (loss_7 + loss_8) * 0.5 + (loss_9 + loss_10) * 0.5 + (loss_11 + loss_12) * 0.5
+        local_loss = (local_loss + local_loss2) * 0.5 + (local_loss3 + local_loss4) * 0.5 + (local_loss5 + local_loss6) * 0.5 + (local_loss7 + local_loss8) * 0.5 + (local_loss9 + local_loss10) * 0.5 + (local_loss11 + local_loss12) * 0.5
+        loss = global_loss + local_loss
 
-        loss = glob_loss
-                        
         # 손실 및 시간 기록
         loss_mtr.update(loss.item(), image.shape[0])
         optimizer.zero_grad()

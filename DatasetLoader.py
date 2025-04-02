@@ -19,136 +19,99 @@ import soundfile as sf
 
 class GetAudioVideoDataset(Dataset):
 
-    def __init__(self, args, mode='train', transforms=None):
-        if mode == 'train':
-            json_file = '/mnt/scratch/users/individuals/VGGsound_individual/metadata/train_a_third.json'
-            data_path = '/mnt/scratch/users/individuals/VGGsound_individual/train'
-            # json_file = '/mnt/scratch/users/sally/VGGsound_individual/metadata/train_practice.json'
-            # data_path = '/mnt/scratch/users/sally/VGGsound_individual/train_practice'
-        else:
-            json_file = '/mnt/scratch/users/individuals/VGGsound_individual/metadata/test.json'
-            data_path = '/mnt/scratch/users/individuals/VGGsound_individual/test'
+    def __init__(self, args, transforms=None):
+        # Train 데이터 로드
+        train_json_file = '/mnt/scratch/users/individuals/VGGsound_individual/metadata/train_a_third.json'
+        train_data_path = '/mnt/scratch/users/individuals/VGGsound_individual/train'
+        with open(train_json_file, 'r') as f:
+            train_data = json.load(f)['data']
 
-        with open(json_file, 'r') as f:
-            self.data = json.load(f)['data']
-            
-            if mode == 'test':
-                self.data = self.data[:1000]
+        # Test 데이터 로드
+        test_json_file = '/mnt/scratch/users/individuals/VGGsound_individual/metadata/test.json'
+        test_data_path = '/mnt/scratch/users/individuals/VGGsound_individual/test'
+        with open(test_json_file, 'r') as f:
+            test_data = json.load(f)['data']  # 테스트 데이터 5000개로 제한
 
-        self.audio_path = os.path.join(data_path, 'sample_audio')
-        self.video_path = os.path.join(data_path, 'sample_frames/frame_4')
+        # 데이터 합치기
+        self.data = train_data + test_data
+        self.audio_paths = {
+            "train": os.path.join(train_data_path, 'sample_audio'),
+            "test": os.path.join(test_data_path, 'sample_audio')
+        }
+        self.video_paths = {
+            "train": os.path.join(train_data_path, 'sample_frames/frame_4'),
+            "test": os.path.join(test_data_path, 'sample_frames/frame_4')
+        }
 
-        
-        self.imgSize = args.image_size 
-        self.mode = mode
+        # 데이터셋 구분 정보 추가
+        self.data_modes = ['train'] * len(train_data) + ['test'] * len(test_data)
+
+        # 기타 설정
+        self.imgSize = args.image_size
         self.transforms = transforms
-
-        # initialize video transform
-        self._init_atransform()  # audio spectrogram의 텐서화 및 정규화를 수행
-        self._init_transform() # image 변환 작업을 수행
-        #  Retrieve list of audio and video files
-
-        # JSON 데이터 로드 (for top-k similarity)
-        with open('/mnt/scratch/users/sally/top_k_similarity_4.json', 'r') as f:
-            self.top_k_data = top_k_data = json.load(f)
+        self._init_atransform()
+        self._init_transform()
 
     def _init_transform(self):
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
 
-        if self.mode == 'train': # 훈련 모드
-            self.img_transform = transforms.Compose([
-                transforms.Resize(int(self.imgSize * 1.1), Image.BICUBIC), # image를 self.imgSize의 1.1배 크기로 확대
-                transforms.RandomCrop(self.imgSize), # random crop을 통해 image의 일부분을 임의로 자름
-                transforms.RandomHorizontalFlip(), # 50% 확률로 image를 좌우로 뒤집어 데이터 다양성을 더함.
-                transforms.CenterCrop(self.imgSize), # 중앙 부분을 잘라냄
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std)]) # 텐서로 변환 후 정규화
-        else: # test 모드
-            self.img_transform = transforms.Compose([
-                transforms.Resize(self.imgSize, Image.BICUBIC),
-                transforms.CenterCrop(self.imgSize),
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std)]) # 텐서로 변환 후 정규화           
-
-    def _init_atransform(self):
-        self.aid_transform = transforms.Compose([transforms.ToTensor(),transforms.Normalize(mean=[0.0], std=[12.0])])
-        # audio spectrogram data를 tensor 형식으로 변환. -> 표준 편차를 12.0으로 설정하여 정규화
-#  
-
-    def _load_frame(self, path):
-        img = Image.open(path).convert('RGB') # 주어진 경로에서 image를 읽고 RGB로 변환하여 반환
-        return img
-
-    def __len__(self):
-        # Consider all positive and negative examples
-        return len(self.data)  # self.length
-
-    def __getitem__(self, idx):
-        # json file에서 audio & video path 가져오기
-    
-        item = self.data[idx]
-        video_id = item['video_id']
-
-        audio_path = os.path.join(self.audio_path, f"{video_id}.wav")
-        video_path = os.path.join(self.video_path, f"{video_id}.jpg")
-
-        # ======= 1. 기본적인 image, audio 데이터 가져오기 ======= # 
-
-        # image load 및 전처리
-        frame = self.img_transform(self._load_frame(video_path))
-        frame_ori = np.array(self._load_frame(video_path))
-        
-        # 오디오 로드 및 전처리
-        samples, samplerate = sf.read(audio_path)
-
-
-        # repeat if audio is too short -> audio 길이가 10초에 미치지 못하면,  ㅡ필요한 길이만큼 반복하여 samples를 확장
-        if samples.shape[0] < samplerate * 10:
-            n = int(samplerate * 10 / samples.shape[0]) + 1
-            samples = np.tile(samples, n)
-        resamples = samples[:samplerate*10] # samples에서 정확히 10초를 잘라내어 resamples에 저장
-
-        resamples[resamples > 1.] = 1.
-        resamples[resamples < -1.] = -1.
-        frequencies, times, spectrogram = signal.spectrogram(resamples,samplerate, nperseg=512,noverlap=274) # audio spectrogram을 생성
-        spectrogram = np.log(spectrogram+ 1e-7) # spectrogram의 값을 log scale로 변환 -> spectrogram에 저장
-        spectrogram = self.aid_transform(spectrogram) # spectrogram data를 tensor로 변환하고 정규화
-
-        v_hp_frame = torch.zeros((3, self.imgSize, self.imgSize))  # 기본값 설정
-        v_aug_frame = torch.zeros((3, self.imgSize, self.imgSize))  # 기본값 설정
-
-        if self.mode == 'train':
-            # ======= 2. top-k similarity 데이터 가져오기 (Train 한정) ======= #
-
-            indices = None
-            for key, value in self.top_k_data.items():
-                if value["Top-200"]["video_id"] == video_id:
-                    indices = value["Top-200"]["indices"]
-
-            selected_index = random.choice(indices)
-            v_hp_id = self.data[selected_index]["video_id"]
-            v_hp_path = '/mnt/scratch/users/individuals/VGGsound_individual/train/sample_frames/frame_4'
-            v_hp_path = os.path.join(v_hp_path, f"{v_hp_id}.jpg")
-            v_hp_frame = self.img_transform(self._load_frame(v_hp_path))
-
-            # ======= 3. data augmentation ====== #
-            mean = [0.485, 0.456, 0.406]
-            std = [0.229, 0.224, 0.225]
-
-            aug_img_transform = transforms.Compose([
+        self.img_transforms = {
+            "train": transforms.Compose([
                 transforms.Resize(int(self.imgSize * 1.1), Image.BICUBIC),
                 transforms.RandomCrop(self.imgSize),
                 transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-                transforms.RandomAffine(degrees=0, translate=(0.2, 0.2)),
                 transforms.CenterCrop(self.imgSize),
-                transforms.RandomGrayscale(p=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std)
+            ]),
+            "test": transforms.Compose([
+                transforms.Resize(self.imgSize, Image.BICUBIC),
+                transforms.CenterCrop(self.imgSize),
                 transforms.ToTensor(),
                 transforms.Normalize(mean, std)
             ])
+        }
 
-            v_aug_frame = aug_img_transform(self._load_frame(video_path))
+    def _init_atransform(self):
+        self.aid_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.0], std=[12.0])
+        ])
 
+    def _load_frame(self, path):
+        img = Image.open(path).convert('RGB')
+        return img
 
-        return frame,spectrogram,v_hp_frame, v_aug_frame,resamples,video_id,torch.tensor(frame_ori)
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        # 데이터셋 모드에 따라 파일 경로 및 변환 로드
+        mode = self.data_modes[idx]
+        item = self.data[idx]
+        video_id = item['video_id']
+
+        audio_path = os.path.join(self.audio_paths[mode], f"{video_id}.wav")
+        video_path = os.path.join(self.video_paths[mode], f"{video_id}.jpg")
+
+        # Image 처리
+        frame = self.img_transforms[mode](self._load_frame(video_path))
+        frame_ori = np.array(self._load_frame(video_path))
+
+        # Audio 처리
+        samples, samplerate = sf.read(audio_path)
+        if samples.shape[0] < samplerate * 10:
+            n = int(samplerate * 10 / samples.shape[0]) + 1
+            samples = np.tile(samples, n)
+        resamples = samples[:samplerate * 10]
+
+        resamples[resamples > 1.] = 1.
+        resamples[resamples < -1.] = -1.
+        frequencies, times, spectrogram = signal.spectrogram(
+            resamples, samplerate, nperseg=512, noverlap=274
+        )
+        spectrogram = np.log(spectrogram + 1e-7)
+        spectrogram = self.aid_transform(spectrogram)
+
+        return frame, spectrogram, resamples, video_id, torch.tensor(frame_ori)

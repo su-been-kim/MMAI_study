@@ -11,11 +11,11 @@ import json
 import time
 
 # 데이터셋 경로와 파라미터 설정
-FEATURES_FILE = './topk_features/features_vggsx512_300.pt'
-SIMILARITY_FILE = './topk_similarity/similarity_matrix_60000x60000_300.pt'
-TOP_K_FILE = './top_k_similarity_300.json'
+FEATURES_FILE = './top_k/topk_features/features_vggsx512_60000.pt'
+SIMILARITY_FILE = './top_k/topk_similarity/similarity_matrix_60000x60000_60000.pt'
+TOP_K_FILE = './top_k_similarity_60000.json'
 BATCH_SIZE = 16
-TOP_K_VALUES = [30]
+TOP_K_VALUES = [60000]
 
 import argparse
 
@@ -87,7 +87,7 @@ with torch.no_grad():
         features[start_idx:end_idx] = batch_features
 
 print(f"Feature extraction completed in {time.time() - start_time:.2f} seconds.")
-torch.save(features.cpu(), FEATURES_FILE)
+# torch.save(features.cpu(), FEATURES_FILE)
 
 # import pdb; pdb.set_trace()
 print("id_list len : ", len(id_list))  # 61142여야 하는데 61136이 나옴
@@ -114,7 +114,7 @@ for i in range(num_samples):
         print(f"Processed {i}/{num_samples} images...")
 
 # Similarity Matrix 저장
-torch.save(similarity_matrix, SIMILARITY_FILE)
+# torch.save(similarity_matrix, SIMILARITY_FILE)
 print(f"Similarity matrix saved. Total time: {time.time() - start_time:.2f} seconds.")
 
 
@@ -138,11 +138,11 @@ for i in range(num_samples):
         if video_id not in top_k_results:
             top_k_results[i] = {}
 
-        # random_index = random.choice(topk_indices)  # 텐서를 리스트로 변환 후 random.choice 사용
-        # random_index = [random_index]
+        random_index = random.choice(topk_indices)  # 텐서를 리스트로 변환 후 random.choice 사용
+        random_index = [random_index]
 
-        # top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": random_index}
-        top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": topk_indices}
+        top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": random_index}
+        # top_k_results[i][f"Top-{k}"] = {"video_id" : video_id, "indices": topk_indices}
         # top_k_results[video_id][f"Top-{k}"] = {"indices": topk_indices}
 
 
