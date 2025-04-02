@@ -39,6 +39,7 @@ For a high-level visual summary of the system architecture, data flow, and exper
 ### Utilities
 - `topk_similarity.py`: Generates top-k similarity JSON outputs
 - `utils.py`: General utility functions (logging, configuration, etc.)
+- `practice_train.ipynb`: Testing Compositional image retrieval task
 
 ---
 
@@ -60,3 +61,17 @@ It is derived from the official [VGGSound Dataset](https://www.robots.ox.ac.uk/~
 
 ---
 
+### 3. Example: Training with Semantic + Multiview Loss
+
+You can launch training with semantic and multiview loss functions using the following command:
+
+```bash
+python train_final_s_m.py \                          # Main training script
+  --exp_dir ./logs/exp1 \                            # Directory to save logs and checkpoints
+  --init_lr 0.001 \                                  # Initial learning rate
+  --epochs 60 \                                      # Number of training epochs
+  --experiment_name 'exp1' \                         # Experiment name used for logging
+  --gpu 0 \                                          # GPU device index to use
+  --topk 100 \                                       # Top-K similar samples to consider
+  --resume_path checkpoints/exp1/epoch_60.pth        # (Optional) Resume from existing checkpoint
+```
